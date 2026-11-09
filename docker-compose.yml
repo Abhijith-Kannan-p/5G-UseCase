@@ -1,0 +1,11 @@
+services:
+  inference:
+    build: ./server
+    image: offload-inference
+    ports: ["8000:8000"]
+    restart: unless-stopped
+  dashboard:
+    build: ./dashboard
+    image: offload-dashboard
+    ports: ["8501:8501"]
+    restart: unless-stopped
