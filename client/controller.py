@@ -108,6 +108,8 @@ class LocalModel:
         table = {
             "resnet18": (tv.models.resnet18, tv.models.ResNet18_Weights.DEFAULT),
             "resnet50": (tv.models.resnet50, tv.models.ResNet50_Weights.DEFAULT),
+            "resnet101": (tv.models.resnet101, tv.models.ResNet101_Weights.DEFAULT),
+            "resnet152": (tv.models.resnet152, tv.models.ResNet152_Weights.DEFAULT),
             "mobilenet_v3_small": (tv.models.mobilenet_v3_small, tv.models.MobileNet_V3_Small_Weights.DEFAULT),
         }
         ctor, w = table[name]
@@ -215,24 +217,33 @@ def main():
             # ---- decide
             note = ""
             if a.mode == "local":
-                want = "LOCAL"
+                want, note = "LOCAL", "Fixed mode: every frame runs on the laptop"
             elif a.mode == "mec":
-                want = "MEC"
+                want, note = "MEC", "Fixed mode: every frame is sent to the server"
             elif ema_local is None:
-                want, note = "LOCAL", "warm-up: measuring local"
+                want, note = "LOCAL", "Warm-up: measuring how fast the laptop is"
             elif ema_mec is None:
-                want, note = "MEC", "warm-up: measuring MEC"
+                want, note = "MEC", "Warm-up: measuring how fast the server is"
             else:
                 m = a.margin
                 if path == "MEC":
                     want = "LOCAL" if ema_mec > ema_local * (1 + m) else "MEC"
                 else:
                     want = "MEC" if ema_mec < ema_local * (1 - m) else "LOCAL"
-                note = f"est MEC {ema_mec:.0f} ms vs local {ema_local:.0f} ms"
+                if want == "MEC":
+                    if ema_mec < ema_local:
+                        note = f"Server is faster: about {ema_mec:.0f} ms vs {ema_local:.0f} ms on the laptop"
+                    else:
+                        note = f"Close call ({ema_mec:.0f} vs {ema_local:.0f} ms): staying on the server to avoid flip-flopping"
+                else:
+                    if ema_mec > ema_local:
+                        note = f"Network is slow: server about {ema_mec:.0f} ms vs {ema_local:.0f} ms on the laptop"
+                    else:
+                        note = f"Close call ({ema_mec:.0f} vs {ema_local:.0f} ms): staying on the laptop to avoid flip-flopping"
                 if want == "LOCAL" and n % a.probe_every == 0:
-                    want, note = "MEC", note + " (probe)"
+                    want, note = "MEC", "Re-testing the server with this frame to see if the network has recovered"
             if want == "MEC" and rtt is None and a.mode == "auto":
-                want, note = "LOCAL", "MEC unreachable"
+                want, note = "LOCAL", "Server not responding, so this frame runs on the laptop"
 
             # ---- execute
             label = conf = server_ms = None
@@ -247,7 +258,7 @@ def main():
                     label, conf = local.predict(fr)
                     lat = a.timeout * 1000 + (time.perf_counter() - t0) * 1000
                     ema_mec = max(ema_mec or 0, a.timeout * 1000)
-                    used, note = "LOCAL", "offload timed out, fell back to local"
+                    used, note = "LOCAL", "Upload timed out (over 2 s), so this frame fell back to the laptop"
             else:
                 t0 = time.perf_counter()
                 label, conf = local.predict(fr)
@@ -257,7 +268,8 @@ def main():
 
             rec = {"ts": time.time(), "frame": n, "mode": a.mode, "path": used, "latency_ms": lat, "rtt_ms": rtt,
                    "server_ms": server_ms, "cpu": cpu, "label": label, "conf": conf,
-                   "bytes": len(jpg) if used == "MEC" else 0, "note": note}
+                   "bytes": len(jpg) if used == "MEC" else 0, "note": note, "reason": note,
+                   "ema_local": ema_local, "ema_mec": ema_mec}
             rep.q.put(rec)
             w.writerow([f"{rec['ts']:.3f}", n, a.mode, used, f"{lat:.1f}", f"{rtt:.1f}" if rtt else "",
                         f"{server_ms:.1f}" if server_ms else "", label, f"{conf:.3f}",
